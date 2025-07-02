@@ -1,0 +1,8 @@
+aiofiles
+apscheduler
+asyncio
+pandas
+playwright
+pytz
+quart
+requests
