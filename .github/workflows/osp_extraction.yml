@@ -4,14 +4,14 @@ on:
   # Runs at 02:00 Europe/London (01:00 UTC)
   schedule:
     - cron: '0 9 * * *'
-  # Allows you to trigger it manually in the Actions UI
+  # Manual trigger
   workflow_dispatch:
 
 jobs:
   extract:
     runs-on: ubuntu-latest
 
-    # Pull in your three secrets from Settings ▶ Secrets ▶ Actions
+    # Secrets must be defined in Settings → Secrets → Actions
     env:
       OSP_USERNAME:  ${{ secrets.OSP_USERNAME }}
       OSP_PASSWORD:  ${{ secrets.OSP_PASSWORD }}
@@ -42,3 +42,9 @@ jobs:
 
       - name: ▶️ Run extractor
         run: python extractor.py
+
+      - name: 📂 Upload logs & screenshots
+        uses: actions/upload-artifact@v3
+        with:
+          name: osp-extraction-output
+          path: output/
