@@ -1,30 +1,32 @@
 name: Daily OSP extraction
 
 on:
-  # 02:00 London time ➜ 01:00 UTC
+  # Runs at 02:00 Europe/London (01:00 UTC)
   schedule:
-    - cron: '0 1 * * *'
+    - cron: '0 9 * * *'
+  # Allows you to trigger it manually in the Actions UI
   workflow_dispatch:
 
 jobs:
   extract:
     runs-on: ubuntu-latest
 
+    # Pull in your three secrets from Settings ▶ Secrets ▶ Actions
     env:
       OSP_USERNAME:  ${{ secrets.OSP_USERNAME }}
       OSP_PASSWORD:  ${{ secrets.OSP_PASSWORD }}
       GCHAT_WEBHOOK: ${{ secrets.GCHAT_WEBHOOK }}
 
     steps:
-      - name: Checkout repository
+      - name: 📥 Check out code
         uses: actions/checkout@v4
 
-      - name: Set up Python 3.11
+      - name: 🐍 Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Cache pip
+      - name: 💾 Cache pip
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
@@ -32,11 +34,11 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
-      - name: Install dependencies & Playwright
+      - name: 🔧 Install dependencies & Playwright
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           python -m playwright install --with-deps chromium
 
-      - name: Run extraction
-        run: python run_extraction.py
+      - name: ▶️ Run extractor
+        run: python extractor.py
