@@ -113,7 +113,7 @@ def create_daily_counts_card(title: str, subtitle: str, counts: List[str], link_
         })
     
     buttons = [
-        {"text": "Dashboard", "onClick": {"openLink": {"url": link_url}}},
+        {"text": "Main Report", "onClick": {"openLink": {"url": link_url}}},
         {"text": "Backup Rep", "onClick": {"openLink": {"url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-2lqGpUUi6LXO5-d/page/DDJ9"}}}
     ]
     
@@ -164,7 +164,7 @@ def create_item_summary_card(title: str, subtitle: str, summary_data: Dict[str, 
     }
     
     buttons = [
-        {"text": "Dashboard", "onClick": {"openLink": {"url": link_url}}},
+        {"text": "Main Report", "onClick": {"openLink": {"url": link_url}}},
         {"text": "Backup Rep", "onClick": {"openLink": {"url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-2lqGpUUi6LXO5-d/page/DDJ9"}}}
     ]
 
@@ -322,10 +322,6 @@ async def extract_osp_data(context: BrowserContext) -> Optional[Dict[str,Dict[st
                         await page.goto(url, timeout=20000, wait_until='domcontentloaded')
                         continue
 
-                    # IMPROVEMENT: Removed page dump on success to reduce log spam.
-                    # It will still dump on error.
-                    # await dump_page_state(page, f"details_{ref}")
-
                     # extract text
                     text = ""
                     for sel in ['main','div[role="main"]','article','section#main-content','div.page-content','div.order-detail-container','body']:
@@ -393,9 +389,6 @@ async def fill_google_form(order_data: Dict[str,str]):
     if not FORM_URL:
         return
     try:
-        # Re-using the global playwright instance is better, but for simplicity
-        # and isolation, a new one is created here. If performance is critical,
-        # this could be refactored to use the main browser context.
         async with async_playwright() as p:
             b = await p.chromium.launch(headless=True)
             ctx = await b.new_context()
@@ -454,10 +447,12 @@ async def generate_daily_item_summary(orders, prod_df) -> Optional[Dict[str, Any
         lines.append("No known items found in tomorrow's orders.")
     else:
         for dept, mins in sorted(by_dept.items()):
-            lines.append(f"{dept}:")
+            # CHANGE: Bold the department name
+            lines.append(f"<b>{dept}:</b>")
             for m, c in sorted(mins.items()):
                 name, _ = lookup.get(m, ("Unknown", ""))
-                lines.append(f"  {m:<9} {name} *{c}")
+                # CHANGE: Bold the item count
+                lines.append(f"  {m:<9} {name} *<b>{c}</b>")
             lines.append("")
             
     return {
@@ -504,7 +499,8 @@ async def main() -> bool:
     tz = timezone('Europe/London')
     ts = datetime.datetime.now(tz).strftime('%d/%m/%y %H:%M')
     base_date = datetime.datetime.now(tz).date()
-    dashboard_url = "https://lookerstudio.google.com/embed/reporting/…" # Replace with actual URL
+    # CHANGE: Updated the main dashboard URL
+    dashboard_url = "https://lookerstudio.google.com/embed/reporting/65cb4d97-37d3-4de9-aab2-096b5d753b96/page/p_3uhgsgcvld"
 
     # --- Send Daily Order Counts Card ---
     counts = []
