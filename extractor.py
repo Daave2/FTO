@@ -99,26 +99,34 @@ async def dump_page_state(page: Page, name: str):
         logger.error(f"❌ HTML dump failed ({html}): {e}")
 
 def create_google_chat_card(title: str, subtitle: str, items: list, link_text: str, link_url: str) -> Dict:
-    text = items[0] if items and items[0].strip().startswith("<pre>") else "<br>".join(str(i) for i in items)
+    """Build a rich message payload for Google Chat.
+
+    Items are sanitized and rendered as bullet points for clarity. If the first
+    item is a ``<pre>`` block, it is inserted unchanged so preformatted
+    summaries remain intact.
+    """
+    widgets = []
+    if items and items[0].strip().startswith("<pre>"):
+        widgets.append({"textParagraph": {"text": items[0]}})
+    else:
+        for item in items:
+            widgets.append({"decoratedText": {"text": f"\u2022 {item}"}})
+    widgets.append({"buttonList": {"buttons": [
+        {"text": link_text,   "onClick": {"openLink": {"url": link_url}}},
+        {"text": "Backup Rep", "onClick": {"openLink": {"url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-2lqGpUUi6LXO5-d/page/DDJ9"}}}
+    ]}})
     return {
         "cardsV2": [{
             "cardId": f"osp-report-{timestamp()}",
             "card": {
                 "header": {"title": title, "subtitle": subtitle},
-                "sections": [{
-                    "widgets": [
-                        {"textParagraph": {"text": text}},
-                        {"buttonList": {"buttons": [
-                            {"text": link_text,   "onClick": {"openLink": {"url": link_url}}},
-                            {"text": "Backup Rep", "onClick": {"openLink": {"url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-2lqGpUUi6LXO5-d/page/DDJ9"}}}
-                        ]}}
-                    ]
-                }]
+                "sections": [{"widgets": widgets}]
             }
         }]
     }
 
 def send_google_chat_message(title: str, subtitle: str, summary_items: list, link_text: str, link_url: str):
+    """Send a Google Chat message summarising extraction results."""
     if not GOOGLE_CHAT_WEBHOOK:
         logger.warning("Google Chat webhook not set; skipping.")
         return
