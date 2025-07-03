@@ -44,6 +44,7 @@ jobs:
         run: python extractor.py
 
       - name: 📂 Upload logs & screenshots
+        if: ${{ always() }}
         uses: actions/upload-artifact@v4
         with:
           name: osp-extraction-output
