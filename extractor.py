@@ -9,6 +9,8 @@ import datetime
 from typing import Optional, Dict, List, Any
 from collections import defaultdict
 from pathlib import Path
+import smtplib
+from email.message import EmailMessage
 
 import aiofiles
 import pandas as pd
@@ -26,6 +28,11 @@ PRODUCT_DATA_FILE = 'fRange.csv'
 LOGIN_USERNAME      = os.environ.get("OSP_USERNAME", "")
 LOGIN_PASSWORD      = os.environ.get("OSP_PASSWORD", "")
 GOOGLE_CHAT_WEBHOOK = os.environ.get("GCHAT_WEBHOOK", "")
+SMTP_SERVER         = os.environ.get("SMTP_SERVER", "")
+SMTP_PORT           = os.environ.get("SMTP_PORT", "465")
+SMTP_USER           = os.environ.get("SMTP_USER", "")
+SMTP_PASS           = os.environ.get("SMTP_PASS", "")
+EMAIL_TO            = os.environ.get("EMAIL_TO", "")
 # ────────────────────────────────────────────────────────────────────────────────
 
 # ─── URLs ────────────────────────────────────────────────────────────────────────
@@ -201,6 +208,46 @@ def send_google_chat_message(payload: Dict, title_for_log: str):
         logger.error(f"Chat failed for '{title_for_log}': {he.response.status_code} {he.response.text}")
     except Exception as e:
         logger.error(f"Chat error for '{title_for_log}': {e}")
+
+def send_orders_email(file_path: Path):
+    """Send the extracted orders file via email."""
+    if not SMTP_SERVER or not EMAIL_TO:
+        logger.info("SMTP settings not configured; skipping email.")
+        return
+
+    msg = EmailMessage()
+    msg["Subject"] = f"OSP Orders Extract {timestamp()}"
+    msg["From"] = SMTP_USER or EMAIL_TO
+    msg["To"] = EMAIL_TO
+    msg.set_content("Attached are the extracted OSP orders.")
+
+    try:
+        with open(file_path, "rb") as f:
+            data = f.read()
+        msg.add_attachment(
+            data,
+            maintype="application",
+            subtype="octet-stream",
+            filename=file_path.name,
+        )
+    except Exception as e:
+        logger.error(f"Failed to attach {file_path}: {e}")
+        return
+
+    try:
+        port = int(SMTP_PORT) if str(SMTP_PORT).isdigit() else 0
+        if port == 465:
+            server = smtplib.SMTP_SSL(SMTP_SERVER, port)
+        else:
+            server = smtplib.SMTP(SMTP_SERVER, port)
+            server.starttls()
+        if SMTP_USER and SMTP_PASS:
+            server.login(SMTP_USER, SMTP_PASS)
+        server.send_message(msg)
+        server.quit()
+        logger.info("Orders email sent.")
+    except Exception as e:
+        logger.error(f"Email send failed: {e}")
 # -------------------------------------------------------------------------------
 
 async def perform_login(page: Page) -> bool:
@@ -537,6 +584,9 @@ async def main() -> bool:
             dashboard_url
         )
         send_google_chat_message(summary_payload, f"Item Summary for {tomorrow_str}")
+
+    # Email the extracted orders file
+    send_orders_email(OUTPUT_DIR / 'extracted_orders_data.csv')
 
     # cleanup
     await browser_instance.close()

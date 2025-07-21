@@ -16,6 +16,11 @@ jobs:
       OSP_USERNAME:  ${{ secrets.OSP_USERNAME }}
       OSP_PASSWORD:  ${{ secrets.OSP_PASSWORD }}
       GCHAT_WEBHOOK: ${{ secrets.GCHAT_WEBHOOK }}
+      SMTP_SERVER:   ${{ secrets.SMTP_SERVER }}
+      SMTP_PORT:     ${{ secrets.SMTP_PORT }}
+      SMTP_USER:     ${{ secrets.SMTP_USER }}
+      SMTP_PASS:     ${{ secrets.SMTP_PASS }}
+      EMAIL_TO:      ${{ secrets.EMAIL_TO }}
 
     steps:
       - name: 📥 Check out code
