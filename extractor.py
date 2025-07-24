@@ -209,8 +209,15 @@ def send_google_chat_message(payload: Dict, title_for_log: str):
     except Exception as e:
         logger.error(f"Chat error for '{title_for_log}': {e}")
 
-def send_orders_email(file_path: Path):
-    """Send the extracted orders file via email."""
+def send_orders_email(file_path: Path, summary_data: Optional[Dict[str, Any]] = None,
+                      prod_df: Optional[pd.DataFrame] = None):
+    """Send the extracted orders file via email.
+
+    If ``summary_data`` is provided, a simple HTML table containing the same
+    item list that is sent to the chat group will be included in the email
+    body. ``prod_df`` should be the product lookup dataframe used for the
+    extraction so item names can be resolved.
+    """
     if not SMTP_SERVER or not EMAIL_TO:
         logger.info("SMTP settings not configured; skipping email.")
         return
@@ -219,7 +226,25 @@ def send_orders_email(file_path: Path):
     msg["Subject"] = f"OSP Orders Extract {timestamp()}"
     msg["From"] = SMTP_USER or EMAIL_TO
     msg["To"] = EMAIL_TO
-    msg.set_content("Attached are the extracted OSP orders.")
+
+    plain_body = "Attached are the extracted OSP orders."
+    html_body = "<p>Attached are the extracted OSP orders.</p>"
+
+    if summary_data and summary_data.get("by_dept") and prod_df is not None:
+        html_body += "<h3>Item Summary</h3><table border='1' cellspacing='0' cellpadding='4'>"
+        html_body += "<tr><th>Department</th><th>MIN</th><th>Item</th><th>Count</th></tr>"
+        for dept, mins in summary_data["by_dept"].items():
+            for m, cnt in mins.items():
+                name = ""
+                try:
+                    name = str(prod_df.loc[m, "Item Name"])
+                except Exception:
+                    name = "Unknown"
+                html_body += f"<tr><td>{dept}</td><td>{m}</td><td>{name}</td><td>{cnt}</td></tr>"
+        html_body += "</table>"
+
+    msg.set_content(plain_body)
+    msg.add_alternative(f"<html><body>{html_body}</body></html>", subtype="html")
 
     try:
         with open(file_path, "rb") as f:
@@ -506,6 +531,7 @@ async def generate_daily_item_summary(orders, prod_df) -> Optional[Dict[str, Any
         "summary_text": "\n".join(lines).strip(),
         "total_orders": total_orders,
         "matched_orders": matched_orders,
+        "by_dept": {d: dict(v) for d, v in by_dept.items()},
     }
 
 async def main() -> bool:
@@ -585,8 +611,12 @@ async def main() -> bool:
         )
         send_google_chat_message(summary_payload, f"Item Summary for {tomorrow_str}")
 
-    # Email the extracted orders file
-    send_orders_email(OUTPUT_DIR / 'extracted_orders_data.csv')
+    # Email the extracted orders file with the same item summary list
+    send_orders_email(
+        OUTPUT_DIR / 'extracted_orders_data.csv',
+        summary_data=summary_data,
+        prod_df=product_lookup_df,
+    )
 
     # cleanup
     await browser_instance.close()
