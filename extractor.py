@@ -237,10 +237,16 @@ def send_orders_email(file_path: Path, summary_data: Optional[Dict[str, Any]] = 
             for m, cnt in mins.items():
                 name = ""
                 try:
-                    name = str(prod_df.loc[m, "Item Name"])
+                    val = prod_df.loc[m, "Item Name"]
+                    if isinstance(val, pd.Series):
+                        val = val.iloc[0]
+                    name = str(val)
                 except Exception:
                     name = "Unknown"
-                html_body += f"<tr><td>{dept}</td><td>{m}</td><td>{name}</td><td>{cnt}</td></tr>"
+                html_body += (
+                    f"<tr><td>{dept}</td><td>{m}</td>"
+                    f"<td>{name}</td><td>{cnt}</td></tr>"
+                )
         html_body += "</table>"
 
     msg.set_content(plain_body)
@@ -550,6 +556,8 @@ async def main() -> bool:
         df['MIN']=df['MIN'].astype(float).astype(int).astype(str)
         df['Item Name']=df['Item Name'].astype(str).fillna('Unknown')
         df['Department']=df['Department'].astype(str).fillna('Unknown')
+        # Remove duplicate MIN codes to avoid multi-index issues
+        df.drop_duplicates(subset='MIN', keep='first', inplace=True)
         df.set_index('MIN',inplace=True)
         product_lookup_df=df
         logger.info(f"Loaded {PRODUCT_DATA_FILE} ({len(df)} items).")
