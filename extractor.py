@@ -231,9 +231,13 @@ def send_orders_email(file_path: Path, summary_data: Optional[Dict[str, Any]] = 
     html_body = "<p>Attached are the extracted OSP orders.</p>"
 
     if summary_data and summary_data.get("by_dept") and prod_df is not None:
-        html_body += "<h3>Item Summary</h3><table border='1' cellspacing='0' cellpadding='4'>"
-        html_body += "<tr><th>Department</th><th>MIN</th><th>Item</th><th>Count</th></tr>"
+        html_body += "<h3>Item Summary</h3>"
         for dept, mins in summary_data["by_dept"].items():
+            html_body += (
+                f"<h4>{dept}</h4>"
+                "<table border='1' cellspacing='0' cellpadding='4'>"
+                "<tr><th>MIN</th><th>Item</th><th>Count</th></tr>"
+            )
             for m, cnt in mins.items():
                 name = ""
                 try:
@@ -244,10 +248,9 @@ def send_orders_email(file_path: Path, summary_data: Optional[Dict[str, Any]] = 
                 except Exception:
                     name = "Unknown"
                 html_body += (
-                    f"<tr><td>{dept}</td><td>{m}</td>"
-                    f"<td>{name}</td><td>{cnt}</td></tr>"
+                    f"<tr><td>{m}</td><td>{name}</td><td>{cnt}</td></tr>"
                 )
-        html_body += "</table>"
+            html_body += "</table>"
 
     msg.set_content(plain_body)
     msg.add_alternative(f"<html><body>{html_body}</body></html>", subtype="html")
