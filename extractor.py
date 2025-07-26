@@ -227,8 +227,8 @@ def send_orders_email(file_path: Path, summary_data: Optional[Dict[str, Any]] = 
     msg["From"] = SMTP_USER or EMAIL_TO
     msg["To"] = EMAIL_TO
 
-    plain_body = "Attached are the extracted OSP orders."
-    html_body = "<p>Attached are the extracted OSP orders.</p>"
+    plain_body = "Attached are the extracted FTO lines for tomorows collection."
+    html_body = "<p>Attached are the extracted FTO lines for tomorows collection.</p>"
 
     if summary_data and summary_data.get("by_dept") and prod_df is not None:
         html_body += "<h3>Item Summary</h3>"
