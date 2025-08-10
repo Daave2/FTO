@@ -191,7 +191,7 @@ def create_item_summary_card(
         for dept, mins in by_dept.items():
             items: List[Dict[str, Any]] = [
                 {"title": "MIN"},
-                {"title": "Item", "wrapText": True},
+                {"title": "Item", "columnSpan": 2},
                 {"title": "Count"},
             ]
             for m, cnt in mins.items():
@@ -202,7 +202,7 @@ def create_item_summary_card(
                     name = "Unknown"
                 items.extend([
                     {"title": m},
-                    {"title": name, "wrapText": True},
+                    {"title": name, "columnSpan": 2},
                     {"title": str(cnt)},
                 ])
             sections.append(
@@ -211,8 +211,7 @@ def create_item_summary_card(
                     "widgets": [
                         {
                             "grid": {
-                                "columnCount": 3,
-                                "columnStretch": [1, 4, 1],
+                                "columnCount": 4,
                                 "borderStyle": {"type": "STROKE"},
                                 "items": items,
                             }
