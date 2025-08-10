@@ -2,19 +2,17 @@
 # -*- coding: utf-8 -*-
 
 """
-OSP Orders Extractor – tables in Google Chat + Email (shared renderer)
-- Faster row parsing and pagination
-- Robust login/session reuse
-- Optional Google Form + Chat + Email
-- CLI flags, retries, graceful shutdown
-- HTML tables rendered identically in Email and Google Chat
+OSP Orders Extractor – fix for 'coroutine was never awaited' + resilient open + synced HTML tables
+- Fix: wait_for_any now uses create_task and cleans up properly
+- Fix: open order waits for multiple detail selectors and yields after click
+- Safety: always write CSV (even if empty) and guard email attachment
+- Chat + Email share the same HTML table builder
 """
 
 import asyncio
 import os
 import sys
 import logging
-import json
 import re
 import datetime as dt
 from typing import Optional, Dict, List, Any, Tuple
@@ -22,6 +20,7 @@ from collections import defaultdict
 from pathlib import Path
 import signal
 import argparse
+import contextlib
 
 import smtplib
 from email.message import EmailMessage
@@ -131,33 +130,42 @@ async def a_retry(coro_fn, *args, retries=3, base_sleep=0.8, on_error=None, **kw
             await asyncio.sleep(base_sleep * (2**i))
 
 async def wait_for_any(page: Page, selectors: List[str], timeout=15000) -> Optional[str]:
-    tasks = [page.wait_for_selector(sel, timeout=timeout) for sel in selectors]
+    """Return the selector that appeared first or None. Avoids 'never awaited' warnings."""
+    tasks: List[asyncio.Task] = []
     try:
+        for sel in selectors:
+            tasks.append(asyncio.create_task(page.wait_for_selector(sel, timeout=timeout)))
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        # cancel the rest
         for p in pending:
             p.cancel()
-        if done:
-            for sel in selectors:
+        # verify which selector is actually present
+        for sel in selectors:
+            try:
                 if await page.locator(sel).count() > 0:
                     return sel
-    except Exception:
-        pass
-    return None
+            except Exception:
+                pass
+        return None
+    finally:
+        # ensure all tasks are resolved to avoid warnings
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+            with contextlib.suppress(Exception):
+                await t
 
 # ─── Shared HTML table builder (Email + Chat) ──────────────────────────────────
 def build_summary_tables_html(summary_data: Dict[str, Any], prod_df: pd.DataFrame) -> str:
-    """Return HTML with one table per department. Used by both Email and Google Chat."""
     if not summary_data or not summary_data.get("by_dept") or prod_df is None or prod_df.empty:
         return "<i>No matched items found.</i>"
 
     html = []
-    # style attributes kept simple for chat/email
     table_open = (
         "<table border='1' cellspacing='0' cellpadding='4' "
         "style='border-collapse:collapse; width:100%; font-family:sans-serif; font-size:12px;'>"
         "<tr><th>MIN</th><th>Item</th><th>Count</th></tr>"
     )
-
     for dept, mins in summary_data["by_dept"].items():
         html.append(f"<h4 style='margin:8px 0'>{dept}</h4>")
         html.append(table_open)
@@ -175,38 +183,26 @@ def _chat_buttons(link_url: str) -> List[Dict[str, Any]]:
         {"text": "Main Report", "onClick": {"openLink": {"url": link_url}}},
         {
             "text": "Backup Rep",
-            "onClick": {
-                "openLink": {
-                    "url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-2lqGpUUi6LXO5-d/page/DDJ9"
-                }
-            },
+            "onClick": {"openLink": {"url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-2lqGpUUi6LXO5-d/page/DDJ9"}},
         },
     ]
 
 def create_daily_counts_card(title: str, subtitle: str, counts: List[str], link_url: str) -> Dict[str, Any]:
     widgets = [{"decoratedText": {"startIcon": {"knownIcon": "TICKET"}, "text": item}} for item in counts]
     return {
-        "cardsV2": [
-            {
-                "cardId": f"osp-daily-counts-{now_str()}",
-                "card": {
-                    "header": {
-                        "title": title,
-                        "subtitle": subtitle,
-                        "imageUrl": "https://img.icons8.com/office/80/calendar-today.png",
-                        "imageType": "CIRCLE",
-                    },
-                    "sections": [
-                        {"header": "Upcoming Order Totals", "widgets": widgets, "collapsible": True, "uncollapsibleWidgetsCount": 3},
-                        {"widgets": [{"buttonList": {"buttons": _chat_buttons(link_url)}}]},
-                    ],
-                },
-            }
-        ]
+        "cardsV2": [{
+            "cardId": f"osp-daily-counts-{now_str()}",
+            "card": {
+                "header": {"title": title, "subtitle": subtitle, "imageUrl": "https://img.icons8.com/office/80/calendar-today.png", "imageType": "CIRCLE"},
+                "sections": [
+                    {"header": "Upcoming Order Totals", "widgets": widgets, "collapsible": True, "uncollapsibleWidgetsCount": 3},
+                    {"widgets": [{"buttonList": {"buttons": _chat_buttons(link_url)}}]},
+                ],
+            },
+        }]
     }
 
 def create_item_summary_card(title: str, subtitle: str, summary_data: Dict[str, Any], link_url: str, prod_df: pd.DataFrame) -> Dict[str, Any]:
-    """Google Chat card with the same HTML tables as the email."""
     stats_grid = {
         "grid": {
             "title": "Summary Stats",
@@ -220,26 +216,18 @@ def create_item_summary_card(title: str, subtitle: str, summary_data: Dict[str, 
     }
     tables_html = build_summary_tables_html(summary_data, prod_df)
     summary_paragraph = {"textParagraph": {"text": tables_html}}
-
     return {
-        "cardsV2": [
-            {
-                "cardId": f"osp-item-summary-{now_str()}",
-                "card": {
-                    "header": {
-                        "title": title,
-                        "subtitle": subtitle,
-                        "imageUrl": "https://img.icons8.com/color/96/shopping-cart--v1.png",
-                        "imageType": "CIRCLE",
-                    },
-                    "sections": [
-                        {"widgets": [stats_grid]},
-                        {"header": "Item Details", "widgets": [summary_paragraph]},
-                        {"widgets": [{"buttonList": {"buttons": _chat_buttons(link_url)}}]},
-                    ],
-                },
-            }
-        ]
+        "cardsV2": [{
+            "cardId": f"osp-item-summary-{now_str()}",
+            "card": {
+                "header": {"title": title, "subtitle": subtitle, "imageUrl": "https://img.icons8.com/color/96/shopping-cart--v1.png", "imageType": "CIRCLE"},
+                "sections": [
+                    {"widgets": [stats_grid]},
+                    {"header": "Item Details", "widgets": [summary_paragraph]},
+                    {"widgets": [{"buttonList": {"buttons": _chat_buttons(link_url)}}]},
+                ],
+            },
+        }]
     }
 
 def send_google_chat_message(payload: Dict[str, Any], title_for_log: str):
@@ -267,23 +255,29 @@ def send_orders_email(file_path: Path, summary_data: Optional[Dict[str, Any]] = 
     msg["From"] = SMTP_USER or EMAIL_TO
     msg["To"] = EMAIL_TO
 
-    plain = "Attached are the extracted FTO lines for tomorrow's collection."
-    html_body = "<p>Attached are the extracted FTO lines for tomorrow's collection.</p>"
-
-    # Use the same HTML builder as Chat
-    if summary_data and prod_df is not None and not prod_df.empty:
-        html_body += "<h3>Item Summary</h3>"
-        html_body += build_summary_tables_html(summary_data, prod_df)
+    if summary_data and summary_data.get("by_dept"):
+        html_body = "<p>Attached are the extracted FTO lines for tomorrow's collection.</p><h3>Item Summary</h3>"
+        if prod_df is not None and not prod_df.empty:
+            html_body += build_summary_tables_html(summary_data, prod_df)
+        else:
+            html_body += "<i>Product data unavailable.</i>"
+        plain = "Attached are the extracted FTO lines for tomorrow's collection. See summary in the HTML version."
+    else:
+        html_body = "<p>No matched items found for tomorrow.</p>"
+        plain = "No matched items found for tomorrow."
 
     msg.set_content(plain)
     msg.add_alternative(f"<html><body>{html_body}</body></html>", subtype="html")
 
+    # Attach file only if it exists and is non-empty
     try:
-        with open(file_path, "rb") as f:
-            msg.add_attachment(f.read(), maintype="application", subtype="octet-stream", filename=file_path.name)
+        if file_path.exists() and file_path.is_file() and file_path.stat().st_size > 0:
+            with open(file_path, "rb") as f:
+                msg.add_attachment(f.read(), maintype="application", subtype="octet-stream", filename=file_path.name)
+        else:
+            logger.info(f"CSV not attached (missing or empty): {file_path}")
     except Exception as e:
         logger.error(f"Failed to attach {file_path}: {e}")
-        return
 
     try:
         port = int(SMTP_PORT) if str(SMTP_PORT).isdigit() else 0
@@ -343,11 +337,9 @@ async def login_and_get_context(b: Browser) -> Optional[BrowserContext]:
             logger.info("✔ Session valid; reusing context")
             return ctx
     finally:
-        try:
+        with contextlib.suppress(Exception):
             if not page.is_closed():
                 await page.close()
-        except Exception:
-            pass
 
 # ─── Extraction ────────────────────────────────────────────────────────────────
 async def _collect_refs_from_table(page: Page) -> List[str]:
@@ -363,18 +355,33 @@ async def _collect_refs_from_table(page: Page) -> List[str]:
     return refs
 
 async def _open_order(page: Page, ref: str) -> bool:
+    # Try to click the row that has this ref in the first cell
     row = await page.query_selector(f'tbody tr:has(td:first-child:has-text("{ref}"))')
     if not row:
         row = await page.query_selector(f'tbody tr:has-text("{ref}")')
     if not row:
         return False
+
     await row.click(timeout=10000)
-    sel = await wait_for_any(page, ['text="Order contents"', 'h2:has-text("Order contents")'], timeout=20000)
+    # Small yield to let any drawer/modal render
+    await page.wait_for_timeout(150)
+
+    # Consider multiple ways details might appear
+    sel = await wait_for_any(
+        page,
+        [
+            'text="Order contents"',
+            'h2:has-text("Order contents")',
+            'role=dialog >> text="Order contents"',
+            'section:has-text("Order contents")',
+        ],
+        timeout=20000,
+    )
     return bool(sel)
 
 async def _extract_order_text(page: Page) -> Tuple[str, str]:
     best = ""
-    for sel in ["main", 'div[role="main"]', "article", "section#main-content", "div.page-content", "body"]:
+    for sel in ["main", 'div[role="main"]', "article", "section#main-content", "div.page-content", "body", "dialog"]:
         try:
             loc = page.locator(sel)
             if await loc.count() > 0:
@@ -387,10 +394,8 @@ async def _extract_order_text(page: Page) -> Tuple[str, str]:
     slot = dt.date.today().strftime("%Y-%m-%d")
     m = re.search(r"Collection slot:\s*(\d{2}-\d{2}-\d{4})", best or "")
     if m:
-        try:
+        with contextlib.suppress(Exception):
             slot = dt.datetime.strptime(m.group(1), "%d-%m-%Y").strftime("%Y-%m-%d")
-        except Exception:
-            pass
     return best or "", slot
 
 async def extract_osp_data(context: BrowserContext, days: int) -> Optional[Dict[str, Dict[str, str]]]:
@@ -436,7 +441,7 @@ async def extract_osp_data(context: BrowserContext, days: int) -> Optional[Dict[
                     seen.add(ref)
                     logger.info(f"   • processing {ref}")
                     try:
-                        ok = await a_retry(_open_order, page, ref, retries=2, base_sleep=0.8)
+                        ok = await a_retry(_open_order, page, ref, retries=2, base_sleep=0.6)
                         if not ok:
                             logger.warning(f"      could not open details for {ref}")
                             await dump_page_state(page, f"open_error_{ref}")
@@ -456,10 +461,8 @@ async def extract_osp_data(context: BrowserContext, days: int) -> Optional[Dict[
                     except Exception as e:
                         logger.error(f"open/extract {ref}: {e}")
                         await dump_page_state(page, f"extract_error_{ref}")
-                        try:
+                        with contextlib.suppress(Exception):
                             await page.goto(url, timeout=20000, wait_until="domcontentloaded")
-                        except Exception:
-                            pass
 
                 nxt = await page.query_selector('button:has-text("Next"),button[aria-label="Next page"]')
                 if nxt and await nxt.is_enabled():
@@ -469,12 +472,13 @@ async def extract_osp_data(context: BrowserContext, days: int) -> Optional[Dict[
                 else:
                     break
 
-        if data:
-            df = pd.DataFrame.from_dict(data, orient="index")
-            df.index.name = "Order Reference"
-            out = OUTPUT_DIR / "extracted_orders_data.csv"
-            df.to_csv(out)
-            logger.info(f"Saved CSV ({len(data)} orders) -> {out}")
+        # Always write a CSV, even if empty (prevents downstream attachment errors)
+        out = OUTPUT_DIR / "extracted_orders_data.csv"
+        df = pd.DataFrame.from_dict(data, orient="index")
+        df.index.name = "Order Reference"
+        df.to_csv(out)
+        logger.info(f"Saved CSV ({len(data)} orders) -> {out}")
+
         return data
 
     except Exception as e:
@@ -482,11 +486,9 @@ async def extract_osp_data(context: BrowserContext, days: int) -> Optional[Dict[
         await dump_page_state(page, "extract_error")
         return None
     finally:
-        try:
+        with contextlib.suppress(Exception):
             if not page.is_closed():
                 await page.close()
-        except Exception:
-            pass
 
 # ─── Google Form (reusing context) ─────────────────────────────────────────────
 async def fill_google_form(context: BrowserContext, order_data: Dict[str, str]):
@@ -510,10 +512,8 @@ async def fill_google_form(context: BrowserContext, order_data: Dict[str, str]):
         logger.error(f"form error for {order_data.get('Field 1')}: {e}", exc_info=True)
         await dump_page_state(pg, "form_error")
     finally:
-        try:
+        with contextlib.suppress(Exception):
             await pg.close()
-        except Exception:
-            pass
 
 # ─── Summary generation ────────────────────────────────────────────────────────
 def load_product_lookup(path: str) -> pd.DataFrame:
@@ -550,12 +550,7 @@ async def generate_daily_item_summary(orders: Dict[str, Dict[str, str]], prod_df
     total_orders = len([1 for _ in orders.values() if _.get("collection_slot") == key_date])
 
     if not texts:
-        return {
-            "summary_text": f"Orders for {disp}:\n0 total, 0 with item matches.\n\nNo orders scheduled.",
-            "total_orders": 0,
-            "matched_orders": 0,
-            "by_dept": {},
-        }
+        return {"summary_text": f"Orders for {disp}:\n0 total, 0 with item matches.\n\nNo orders scheduled.", "total_orders": 0, "matched_orders": 0, "by_dept": {}}
 
     patterns = compile_min_regex(list(lookup.keys()))
     matched_orders = 0
@@ -582,12 +577,7 @@ async def generate_daily_item_summary(orders: Dict[str, Dict[str, str]], prod_df
                 lines.append(f"  {m:<9} {name} *<b>{c}</b>")
             lines.append("")
 
-    return {
-        "summary_text": "\n".join(lines).strip(),
-        "total_orders": total_orders,
-        "matched_orders": matched_orders,
-        "by_dept": {d: dict(v) for d, v in by_dept.items()},
-    }
+    return {"summary_text": "\n".join(lines).strip(), "total_orders": total_orders, "matched_orders": matched_orders, "by_dept": {d: dict(v) for d, v in by_dept.items()}}
 
 # ─── Main ──────────────────────────────────────────────────────────────────────
 def validate_env() -> None:
@@ -603,10 +593,7 @@ async def run(days: int, headful: bool, skip_form: bool, skip_chat: bool, skip_e
     await ensure_storage_state()
 
     play = await async_playwright().start()
-    browser = await play.chromium.launch(
-        headless=not headful,
-        args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
-    )
+    browser = await play.chromium.launch(headless=not headful, args=["--no-sandbox", "--disable-dev-shm-usage", "--disable-gpu"])
 
     product_df = load_product_lookup(PRODUCT_DATA_FILE)
 
@@ -633,7 +620,6 @@ async def run(days: int, headful: bool, skip_form: bool, skip_chat: bool, skip_e
     ts = dt.datetime.now(TZ).strftime("%d/%m/%y %H:%M")
     base_date = dt.datetime.now(TZ).date()
 
-    # Daily counts (next N days)
     counts = []
     any_orders = False
     for i in range(1, days + 1):
@@ -650,17 +636,10 @@ async def run(days: int, headful: bool, skip_form: bool, skip_chat: bool, skip_e
         counts_payload = create_daily_counts_card("OSP Extraction – Daily Order Counts", f"Ran at: {ts} (UK)", counts, DASHBOARD_URL)
         send_google_chat_message(counts_payload, "Daily Order Counts")
 
-    # Tomorrow summary (now includes HTML tables in Chat)
     summary_data = await generate_daily_item_summary(orders, product_df)
     if not skip_chat:
         tomorrow_str = (base_date + dt.timedelta(days=1)).strftime("%d/%m/%y")
-        summary_payload = create_item_summary_card(
-            f"OSP Item Summary for {tomorrow_str}",
-            f"Ran at: {ts} (UK)",
-            summary_data,
-            DASHBOARD_URL,
-            product_df,
-        )
+        summary_payload = create_item_summary_card(f"OSP Item Summary for {tomorrow_str}", f"Ran at: {ts} (UK)", summary_data, DASHBOARD_URL, product_df)
         send_google_chat_message(summary_payload, f"Item Summary for {tomorrow_str}")
 
     if not skip_email:
