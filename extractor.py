@@ -189,34 +189,30 @@ def create_item_summary_card(
         else:
             lookup = prod_df["Item Name"]
         for dept, mins in by_dept.items():
-            items: List[Dict[str, Any]] = [
-                {"title": "MIN"},
-                {"title": "Item", "columnSpan": 2},
-                {"title": "Count"},
-            ]
+            # Build a monospaced text table so the item column can expand to fit
+            # the longest item name without relying on unsupported properties.
+            data: List[tuple[str, str, int]] = []
+            max_name_len = len("Item")
             for m, cnt in mins.items():
                 try:
                     val = lookup.loc[m]
                     name = val.iloc[0] if isinstance(val, pd.Series) else str(val)
                 except Exception:
                     name = "Unknown"
-                items.extend([
-                    {"title": m},
-                    {"title": name, "columnSpan": 2},
-                    {"title": str(cnt)},
-                ])
+                data.append((m, name, cnt))
+                if len(name) > max_name_len:
+                    max_name_len = len(name)
+
+            fmt = f"{{:<8}} {{:<{max_name_len}}} {{:>5}}"
+            lines = [fmt.format("MIN", "Item", "Count")]
+            for m, name, cnt in data:
+                lines.append(fmt.format(m, name, cnt))
+            table_text = "```\n" + "\n".join(lines) + "\n```"  # code block for monospace formatting
+
             sections.append(
                 {
                     "header": dept,
-                    "widgets": [
-                        {
-                            "grid": {
-                                "columnCount": 4,
-                                "borderStyle": {"type": "STROKE"},
-                                "items": items,
-                            }
-                        }
-                    ],
+                    "widgets": [{"textParagraph": {"text": table_text}}],
                 }
             )
     else:
