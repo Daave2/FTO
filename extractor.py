@@ -146,8 +146,19 @@ def create_daily_counts_card(title: str, subtitle: str, counts: List[str], link_
         }]
     }
 
-def create_item_summary_card(title: str, subtitle: str, summary_data: Dict[str, Any], link_url: str) -> Dict[str, Any]:
-    """Builds a rich Google Chat card for the daily item summary."""
+def create_item_summary_card(
+    title: str,
+    subtitle: str,
+    summary_data: Dict[str, Any],
+    link_url: str,
+    prod_df: Optional[pd.DataFrame] = None,
+) -> Dict[str, Any]:
+    """Builds a rich Google Chat card for the daily item summary.
+
+    If ``prod_df`` and ``summary_data['by_dept']`` are available, each department's
+    items are rendered in a grid table similar to the email report.
+    """
+
     stats_grid = {
         "grid": {
             "title": "Summary Stats",
@@ -155,43 +166,91 @@ def create_item_summary_card(title: str, subtitle: str, summary_data: Dict[str, 
             "borderStyle": {"type": "STROKE"},
             "items": [
                 {
-                    "title": str(summary_data.get('total_orders', 'N/A')),
-                    "subtitle": "Total Orders"
+                    "title": str(summary_data.get("total_orders", "N/A")),
+                    "subtitle": "Total Orders",
                 },
                 {
-                    "title": str(summary_data.get('matched_orders', 'N/A')),
-                    "subtitle": "Orders with Items"
-                }
-            ]
+                    "title": str(summary_data.get("matched_orders", "N/A")),
+                    "subtitle": "Orders with Items",
+                },
+            ],
         }
     }
-    
-    summary_paragraph = {
-        "textParagraph": {"text": f"<pre>{summary_data.get('summary_text', 'Summary not available.')}</pre>"}
-    }
-    
+
+    sections: List[Dict[str, Any]] = [{"widgets": [stats_grid]}]
+
+    by_dept = summary_data.get("by_dept") if isinstance(summary_data, dict) else None
+    if by_dept and prod_df is not None:
+        lookup = prod_df.set_index("MIN")["Item Name"]
+        for dept, mins in by_dept.items():
+            items: List[Dict[str, Any]] = [
+                {"title": "MIN"},
+                {"title": "Item"},
+                {"title": "Count"},
+            ]
+            for m, cnt in mins.items():
+                try:
+                    val = lookup.loc[m]
+                    name = val.iloc[0] if isinstance(val, pd.Series) else str(val)
+                except Exception:
+                    name = "Unknown"
+                items.extend([
+                    {"title": m},
+                    {"title": name},
+                    {"title": str(cnt)},
+                ])
+            sections.append(
+                {
+                    "header": dept,
+                    "widgets": [
+                        {
+                            "grid": {
+                                "columnCount": 3,
+                                "borderStyle": {"type": "STROKE"},
+                                "items": items,
+                            }
+                        }
+                    ],
+                }
+            )
+    else:
+        summary_paragraph = {
+            "textParagraph": {
+                "text": summary_data.get("summary_text", "Summary not available."),
+            }
+        }
+        sections.append({"header": "Item Details", "widgets": [summary_paragraph]})
+
     buttons = [
         {"text": "Main Report", "onClick": {"openLink": {"url": link_url}}},
-        {"text": "Backup Rep", "onClick": {"openLink": {"url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-2lqGpUUi6LXO5-d/page/DDJ9"}}}
+        {
+            "text": "Backup Rep",
+            "onClick": {
+                "openLink": {
+                    "url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-"
+                    "2lqGpUUi6LXO5-d/page/DDJ9",
+                }
+            },
+        },
     ]
 
+    sections.append({"widgets": [{"buttonList": {"buttons": buttons}}]})
+
     return {
-        "cardsV2": [{
-            "cardId": f"osp-item-summary-{timestamp()}",
-            "card": {
-                "header": {
-                    "title": title,
-                    "subtitle": subtitle,
-                    "imageUrl": "https://img.icons8.com/color/96/shopping-cart--v1.png",
-                    "imageType": "CIRCLE"
+        "cardsV2": [
+            {
+                "cardId": f"osp-item-summary-{timestamp()}",
+                "card": {
+                    "header": {
+                        "title": title,
+                        "subtitle": subtitle,
+                        "imageUrl": "https://img.icons8.com/color/96/shopping-cart--v1.png",
+                        "imageType": "CIRCLE",
+                    },
+                    "sections": sections,
                 },
-                "sections": [
-                    {"widgets": [stats_grid]},
-                    {"header": "Item Details", "widgets": [summary_paragraph]},
-                    {"widgets": [{"buttonList": {"buttons": buttons}}]}
-                ]
             }
-        }]
+        ]
     }
 
 def send_google_chat_message(payload: Dict, title_for_log: str):
@@ -618,7 +677,8 @@ async def main() -> bool:
             f"OSP Item Summary for {tomorrow_str}",
             f"Ran at: {ts} (UK)",
             summary_data,
-            dashboard_url
+            dashboard_url,
+            prod_df=product_lookup_df,
         )
         send_google_chat_message(summary_payload, f"Item Summary for {tomorrow_str}")
 
