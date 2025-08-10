@@ -181,7 +181,13 @@ def create_item_summary_card(
 
     by_dept = summary_data.get("by_dept") if isinstance(summary_data, dict) else None
     if by_dept and prod_df is not None:
-        lookup = prod_df.set_index("MIN")["Item Name"]
+        # ``prod_df`` may already be indexed by MIN. If so, ``MIN`` will not
+        # appear as a column. Fall back to using the existing index in that case
+        # so lookups by MIN still succeed.
+        if "MIN" in prod_df.columns:
+            lookup = prod_df.set_index("MIN")["Item Name"]
+        else:
+            lookup = prod_df["Item Name"]
         for dept, mins in by_dept.items():
             items: List[Dict[str, Any]] = [
                 {"title": "MIN"},
