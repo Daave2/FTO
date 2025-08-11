@@ -114,18 +114,15 @@ def create_daily_counts_card(title: str, subtitle: str, counts: List[str], link_
 
 def _dept_table_sections(by_dept: Dict[str, Dict[str, int]], prod_df: pd.DataFrame) -> List[Dict[str, Any]]:
     """
-    Table-like list using decoratedText (Cards V2-safe fields only):
-      • MIN in topLabel
-      • Item name as main text (wraps)
-      • Count in bottomLabel (e.g., “Qty: 2”)
-      • Divider between rows for legibility
+    Clean, readable, table-like list using DecoratedText:
+      • MIN (small, top)   • Item (wraps)   • Qty (bold bottom label)
+      • Divider between rows and an extra divider between departments
     """
     sections: List[Dict[str, Any]] = []
     name_lookup = prod_df["Item Name"] if "Item Name" in prod_df.columns else prod_df
+
     for dept, mins in by_dept.items():
-        widgets: List[Dict[str, Any]] = [{
-            "textParagraph": {"text": "<b>MIN · Item</b><br><i>Count shown below each item</i>"}
-        }, {"divider": {}}]
+        widgets: List[Dict[str, Any]] = []
 
         for m, cnt in sorted(mins.items(), key=lambda kv: (-kv[1], kv[0])):
             try:
@@ -133,21 +130,30 @@ def _dept_table_sections(by_dept: Dict[str, Dict[str, int]], prod_df: pd.DataFra
                 name = val.iloc[0] if isinstance(val, pd.Series) else str(val)
             except Exception:
                 name = "Unknown"
+
             widgets.append({
                 "decoratedText": {
                     "startIcon": {"knownIcon": "BOOKMARK"},
                     "topLabel": str(m),
                     "text": name,
-                    "bottomLabel": f"Qty: {cnt}",
+                    "bottomLabel": f"<b>Qty: {cnt}</b>",
                     "wrapText": True
                 }
             })
-            widgets.append({"divider": {}})
+            widgets.append({"divider": {}})  # row divider
 
+        # remove trailing row divider
         if widgets and "divider" in widgets[-1]:
             widgets.pop()
 
-        sections.append({"header": dept, "widgets": widgets if widgets else [{"textParagraph": {"text": "No items"}}]})
+        # add a department divider after the section for visual break
+        widgets.append({"divider": {}})
+
+        sections.append({
+            "header": dept,
+            "widgets": widgets if widgets else [{"textParagraph": {"text": "No items"}}]
+        })
+
     return sections
 
 def create_item_summary_card(
