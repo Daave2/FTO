@@ -85,10 +85,6 @@ async def ensure_storage_state():
             logger.error(f"Could not initialize storage state: {e}")
 
 async def dump_page_state(page: Page, name: str):
-    """
-    Take a full-page screenshot and HTML dump synchronously,
-    before any context/page is closed. ONLY USED FOR ERRORS.
-    """
     ts = timestamp()
     png = OUTPUT_DIR / f"{name}_{ts}.png"
     html = OUTPUT_DIR / f"{name}_{ts}.html"
@@ -105,25 +101,22 @@ async def dump_page_state(page: Page, name: str):
     except Exception as e:
         logger.error(f"❌ HTML dump failed ({html}): {e}")
 
-# --- New, improved Google Chat card generators ---------------------------------
+# ── Card builders ───────────────────────────────────────────────────────────────
 
 def create_daily_counts_card(title: str, subtitle: str, counts: List[str], link_url: str) -> Dict[str, Any]:
-    """Builds a rich Google Chat card for daily order counts."""
     widgets = []
     for item in counts:
-        # Use decoratedText for a cleaner look with icons
         widgets.append({
             "decoratedText": {
                 "startIcon": {"knownIcon": "TICKET"},
-                "text": item
+                "text": item,
+                "wrapText": True
             }
         })
-    
     buttons = [
         {"text": "Main Report", "onClick": {"openLink": {"url": link_url}}},
         {"text": "Backup Rep", "onClick": {"openLink": {"url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-2lqGpUUi6LXO5-d/page/DDJ9"}}}
     ]
-    
     return {
         "cardsV2": [{
             "cardId": f"osp-daily-counts-{timestamp()}",
@@ -136,15 +129,75 @@ def create_daily_counts_card(title: str, subtitle: str, counts: List[str], link_
                 },
                 "sections": [{
                     "header": "Upcoming Order Totals",
-                    "widgets": widgets,
-                    "collapsible": True,
-                    "uncollapsibleWidgetsCount": 3
+                    "widgets": widgets
                 }, {
                     "widgets": [{"buttonList": {"buttons": buttons}}]
                 }]
             }
         }]
     }
+
+def _dept_table_sections(
+    by_dept: Dict[str, Dict[str, int]],
+    prod_df: pd.DataFrame,
+    show_first_rows: int = 1000  # effectively show all; lower to auto-collapse long lists
+) -> List[Dict[str, Any]]:
+    """
+    Build per-department sections that *look* like a table:
+      • MIN shown as small top label
+      • Item name wraps on its own line
+      • Quantity right-aligned as endLabel
+      • Divider between rows for readability
+    """
+    sections: List[Dict[str, Any]] = []
+    name_lookup = prod_df["Item Name"] if "Item Name" in prod_df.columns else prod_df
+
+    for dept, mins in by_dept.items():
+        widgets: List[Dict[str, Any]] = []
+
+        # Header row (fake table header)
+        widgets.append({
+            "decoratedText": {
+                "startIcon": {"knownIcon": "DESCRIPTION"},
+                "text": "<b>Item</b>",
+                "topLabel": "MIN",
+                "endLabel": "Count",
+                "wrapText": True
+            }
+        })
+        widgets.append({"divider": {}})
+
+        # Data rows
+        for m, cnt in sorted(mins.items(), key=lambda kv: (-kv[1], kv[0])):
+            try:
+                val = name_lookup.loc[m]
+                name = val.iloc[0] if isinstance(val, pd.Series) else str(val)
+            except Exception:
+                name = "Unknown"
+            widgets.append({
+                "decoratedText": {
+                    "startIcon": {"knownIcon": "BOOKMARK"},
+                    "topLabel": str(m),
+                    "text": name,
+                    "endLabel": f"x{cnt}",
+                    "wrapText": True
+                }
+            })
+            widgets.append({"divider": {}})
+
+        # Remove trailing divider for neatness
+        if widgets and "divider" in widgets[-1]:
+            widgets.pop()
+
+        # If you want auto-collapse for very long lists, set collapsible True and
+        # adjust uncollapsibleWidgetsCount. With header+divider rows, multiply by ~2.
+        sections.append({
+            "header": dept,
+            # "collapsible": True,
+            # "uncollapsibleWidgetsCount": min(len(widgets), show_first_rows*2),
+            "widgets": widgets if widgets else [{"textParagraph": {"text": "No items"}}]
+        })
+    return sections
 
 def create_item_summary_card(
     title: str,
@@ -153,26 +206,14 @@ def create_item_summary_card(
     link_url: str,
     prod_df: Optional[pd.DataFrame] = None,
 ) -> Dict[str, Any]:
-    """Builds a rich Google Chat card for the daily item summary.
-
-    If ``prod_df`` and ``summary_data['by_dept']`` are available, each department's
-    items are rendered in a grid table similar to the email report.
-    """
-
     stats_grid = {
         "grid": {
             "title": "Summary Stats",
             "columnCount": 2,
             "borderStyle": {"type": "STROKE"},
             "items": [
-                {
-                    "title": str(summary_data.get("total_orders", "N/A")),
-                    "subtitle": "Total Orders",
-                },
-                {
-                    "title": str(summary_data.get("matched_orders", "N/A")),
-                    "subtitle": "Orders with Items",
-                },
+                {"title": str(summary_data.get("total_orders", "N/A")), "subtitle": "Total Orders"},
+                {"title": str(summary_data.get("matched_orders", "N/A")), "subtitle": "Orders with Items"},
             ],
         }
     }
@@ -180,83 +221,36 @@ def create_item_summary_card(
     sections: List[Dict[str, Any]] = [{"widgets": [stats_grid]}]
 
     by_dept = summary_data.get("by_dept") if isinstance(summary_data, dict) else None
-    if by_dept and prod_df is not None:
-        # ``prod_df`` may already be indexed by MIN. If so, ``MIN`` will not
-        # appear as a column. Fall back to using the existing index in that case
-        # so lookups by MIN still succeed.
-        if "MIN" in prod_df.columns:
-            lookup = prod_df.set_index("MIN")["Item Name"]
-        else:
-            lookup = prod_df["Item Name"]
-        for dept, mins in by_dept.items():
-            # Build a monospaced text table so the item column can expand to fit
-            # the longest item name without relying on unsupported properties.
-            data: List[tuple[str, str, int]] = []
-            max_name_len = len("Item")
-            for m, cnt in mins.items():
-                try:
-                    val = lookup.loc[m]
-                    name = val.iloc[0] if isinstance(val, pd.Series) else str(val)
-                except Exception:
-                    name = "Unknown"
-                data.append((m, name, cnt))
-                if len(name) > max_name_len:
-                    max_name_len = len(name)
-
-            fmt = f"{{:<8}} {{:<{max_name_len}}} {{:>5}}"
-            lines = [fmt.format("MIN", "Item", "Count")]
-            for m, name, cnt in data:
-                lines.append(fmt.format(m, name, cnt))
-            table_text = "```\n" + "\n".join(lines) + "\n```"  # code block for monospace formatting
-
-            sections.append(
-                {
-                    "header": dept,
-                    "widgets": [{"textParagraph": {"text": table_text}}],
-                }
-            )
+    if by_dept and prod_df is not None and not prod_df.empty:
+        sections.extend(_dept_table_sections(by_dept, prod_df))
     else:
-        summary_paragraph = {
-            "textParagraph": {
-                "text": summary_data.get("summary_text", "Summary not available."),
-            }
-        }
-        sections.append({"header": "Item Details", "widgets": [summary_paragraph]})
+        sections.append({
+            "header": "Item Details",
+            "widgets": [{"textParagraph": {"text": summary_data.get("summary_text", "Summary not available.")}}]
+        })
 
     buttons = [
         {"text": "Main Report", "onClick": {"openLink": {"url": link_url}}},
-        {
-            "text": "Backup Rep",
-            "onClick": {
-                "openLink": {
-                    "url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-"
-                    "2lqGpUUi6LXO5-d/page/DDJ9",
-                }
-            },
-        },
+        {"text": "Backup Rep", "onClick": {"openLink": {"url": "https://lookerstudio.google.com/u/0/reporting/1gboaCxPhYIueczJu-2lqGpUUi6LXO5-d/page/DDJ9"}}},
     ]
-
     sections.append({"widgets": [{"buttonList": {"buttons": buttons}}]})
 
     return {
-        "cardsV2": [
-            {
-                "cardId": f"osp-item-summary-{timestamp()}",
-                "card": {
-                    "header": {
-                        "title": title,
-                        "subtitle": subtitle,
-                        "imageUrl": "https://img.icons8.com/color/96/shopping-cart--v1.png",
-                        "imageType": "CIRCLE",
-                    },
-                    "sections": sections,
+        "cardsV2": [{
+            "cardId": f"osp-item-summary-{timestamp()}",
+            "card": {
+                "header": {
+                    "title": title,
+                    "subtitle": subtitle,
+                    "imageUrl": "https://img.icons8.com/color/96/shopping-cart--v1.png",
+                    "imageType": "CIRCLE",
                 },
-            }
-        ]
+                "sections": sections,
+            },
+        }]
     }
 
 def send_google_chat_message(payload: Dict, title_for_log: str):
-    """Send a pre-built Google Chat card payload."""
     if not GOOGLE_CHAT_WEBHOOK:
         logger.warning("Google Chat webhook not set; skipping.")
         return
@@ -272,13 +266,6 @@ def send_google_chat_message(payload: Dict, title_for_log: str):
 
 def send_orders_email(file_path: Path, summary_data: Optional[Dict[str, Any]] = None,
                       prod_df: Optional[pd.DataFrame] = None):
-    """Send the extracted orders file via email.
-
-    If `summary_data is provided, a simple HTML table containing the same
-    item list that is sent to the chat group will be included in the email
-    body. `prod_df should be the product lookup dataframe used for the
-    extraction so item names can be resolved.
-    """
     if not SMTP_SERVER or not EMAIL_TO:
         logger.info("SMTP settings not configured; skipping email.")
         return
@@ -291,26 +278,22 @@ def send_orders_email(file_path: Path, summary_data: Optional[Dict[str, Any]] = 
     plain_body = "Attached are the extracted FTO lines for tomorows collection."
     html_body = "<p>Attached are the extracted FTO lines for tomorows collection.</p>"
 
-    if summary_data and summary_data.get("by_dept") and prod_df is not None:
+    if summary_data and summary_data.get("by_dept") and prod_df is not None and not prod_df.empty:
         html_body += "<h3>Item Summary</h3>"
+        name_lookup = prod_df["Item Name"] if "Item Name" in prod_df.columns else prod_df
         for dept, mins in summary_data["by_dept"].items():
             html_body += (
                 f"<h4>{dept}</h4>"
-                "<table border='1' cellspacing='0' cellpadding='4'>"
-                "<tr><th>MIN</th><th>Item</th><th>Count</th></tr>"
+                "<table border='1' cellspacing='0' cellpadding='6' style='border-collapse:collapse;font-family:Arial,Helvetica,sans-serif;font-size:14px;'>"
+                "<tr><th align='left'>MIN</th><th align='left'>Item</th><th align='right'>Count</th></tr>"
             )
             for m, cnt in mins.items():
-                name = ""
                 try:
-                    val = prod_df.loc[m, "Item Name"]
-                    if isinstance(val, pd.Series):
-                        val = val.iloc[0]
-                    name = str(val)
+                    val = name_lookup.loc[m]
+                    name = val.iloc[0] if isinstance(val, pd.Series) else str(val)
                 except Exception:
                     name = "Unknown"
-                html_body += (
-                    f"<tr><td>{m}</td><td>{name}</td><td>{cnt}</td></tr>"
-                )
+                html_body += f"<tr><td>{m}</td><td>{name}</td><td align='right'>{cnt}</td></tr>"
             html_body += "</table>"
 
     msg.set_content(plain_body)
@@ -343,7 +326,8 @@ def send_orders_email(file_path: Path, summary_data: Optional[Dict[str, Any]] = 
         logger.info("Orders email sent.")
     except Exception as e:
         logger.error(f"Email send failed: {e}")
-# -------------------------------------------------------------------------------
+
+# ────────────────────────────────────────────────────────────────────────────────
 
 async def perform_login(page: Page) -> bool:
     try:
@@ -355,7 +339,6 @@ async def perform_login(page: Page) -> bool:
         await page.fill('input[placeholder="Password"]', LOGIN_PASSWORD)
         await page.click('button:has-text("Log in")')
         logger.info("→ waiting for orders URL")
-        logger.debug(f"   current URL: {page.url}")
         await page.wait_for_url("https://collect.morrisons.osp.tech/orders*", timeout=60000, wait_until="networkidle")
         await page.wait_for_selector('div:has-text("Orders")', timeout=30000)
         logger.info("✅ Login successful.")
@@ -377,7 +360,6 @@ async def login_and_get_context() -> Optional[BrowserContext]:
         logger.critical("Browser not initialized.")
         return None
 
-    # Try existing storage state
     state = STORAGE_STATE if os.path.exists(STORAGE_STATE) else None
     ctx = await browser_instance.new_context(storage_state=state)
     page = await ctx.new_page()
@@ -388,7 +370,6 @@ async def login_and_get_context() -> Optional[BrowserContext]:
         logger.info("🔄 Session expired; performing full login")
         await page.close()
         await ctx.close()
-
         ctx = await browser_instance.new_context()
         page = await ctx.new_page()
         ok = await perform_login(page)
@@ -464,7 +445,6 @@ async def extract_osp_data(context: BrowserContext) -> Optional[Dict[str,Dict[st
                         await page.goto(url, timeout=20000, wait_until='domcontentloaded')
                         continue
 
-                    # extract text
                     text = ""
                     for sel in ['main','div[role="main"]','article','section#main-content','div.page-content','div.order-detail-container','body']:
                         try:
@@ -488,7 +468,6 @@ async def extract_osp_data(context: BrowserContext) -> Optional[Dict[str,Dict[st
                     data[ref] = {'details': text, 'collection_slot': slot}
                     seen.add(ref)
 
-                    # go back
                     try:
                         back = page.locator('a:has-text("BACK"),button:has-text("BACK")')
                         if await back.count() > 0:
@@ -536,7 +515,6 @@ async def fill_google_form(order_data: Dict[str,str]):
             ctx = await b.new_context()
             pg  = await ctx.new_page()
             await pg.goto(FORM_URL,timeout=60000,wait_until='domcontentloaded')
-
             x = {
                 "Field 1":"//*[@id='mG61Hd']/div[2]/div/div[2]/div[1]//textarea",
                 "Field 2":"//*[@id='mG61Hd']/div[2]/div/div[2]/div[2]//textarea",
@@ -553,7 +531,6 @@ async def fill_google_form(order_data: Dict[str,str]):
         logger.error(f"form error for {order_data.get('Field 1')}: {e}",exc_info=True)
 
 async def generate_daily_item_summary(orders, prod_df) -> Optional[Dict[str, Any]]:
-    """Generates summary and returns a dict with stats and text."""
     if prod_df is None or prod_df.empty:
         return {"summary_text": "Product data unavailable."}
         
@@ -581,24 +558,9 @@ async def generate_daily_item_summary(orders, prod_df) -> Optional[Dict[str, Any
                 found_in_text = True
         if found_in_text:
             matched_orders += 1
-
-    lines = [f"Orders for {disp}:", f"{total_orders} total, {matched_orders} with item matches.", ""]
-    if total_orders == 0:
-        lines.append("No orders scheduled.")
-    elif not by_dept:
-        lines.append("No known items found in tomorrow's orders.")
-    else:
-        for dept, mins in sorted(by_dept.items()):
-            # CHANGE: Bold the department name
-            lines.append(f"<b>{dept}:</b>")
-            for m, c in sorted(mins.items()):
-                name, _ = lookup.get(m, ("Unknown", ""))
-                # CHANGE: Bold the item count
-                lines.append(f"  {m:<9} {name} *<b>{c}</b>")
-            lines.append("")
             
     return {
-        "summary_text": "\n".join(lines).strip(),
+        "summary_text": f"Orders for {disp}: {total_orders} total, {matched_orders} with item matches.",
         "total_orders": total_orders,
         "matched_orders": matched_orders,
         "by_dept": {d: dict(v) for d, v in by_dept.items()},
@@ -620,7 +582,6 @@ async def main() -> bool:
         df['MIN']=df['MIN'].astype(float).astype(int).astype(str)
         df['Item Name']=df['Item Name'].astype(str).fillna('Unknown')
         df['Department']=df['Department'].astype(str).fillna('Unknown')
-        # Remove duplicate MIN codes to avoid multi-index issues
         df.drop_duplicates(subset='MIN', keep='first', inplace=True)
         df.set_index('MIN',inplace=True)
         product_lookup_df=df
@@ -644,10 +605,9 @@ async def main() -> bool:
     tz = timezone('Europe/London')
     ts = datetime.datetime.now(tz).strftime('%d/%m/%y %H:%M')
     base_date = datetime.datetime.now(tz).date()
-    # CHANGE: Updated the main dashboard URL
     dashboard_url = "https://lookerstudio.google.com/embed/reporting/65cb4d97-37d3-4de9-aab2-096b5d753b96/page/p_3uhgsgcvld"
 
-    # --- Send Daily Order Counts Card ---
+    # Daily counts
     counts = []
     any_orders = False
     for i in range(1, 4):
@@ -656,9 +616,7 @@ async def main() -> bool:
         count = sum(1 for v in orders.values() if v.get('collection_slot') == key)
         if count > 0:
             any_orders = True
-        # Use bold for emphasis
         counts.append(f"<b>{count} orders</b> for {d.strftime('%a, %d %b')}")
-        
     if not any_orders:
         counts = ["No orders found for the next 3 days."]
 
@@ -670,8 +628,7 @@ async def main() -> bool:
     )
     send_google_chat_message(counts_payload, "Daily Order Counts")
 
-
-    # --- Send Item Summary Card for Tomorrow ---
+    # Item summary (table-like)
     summary_data = await generate_daily_item_summary(orders, product_lookup_df)
     if summary_data:
         tomorrow_str = (base_date + datetime.timedelta(days=1)).strftime('%d/%m/%y')
@@ -684,14 +641,13 @@ async def main() -> bool:
         )
         send_google_chat_message(summary_payload, f"Item Summary for {tomorrow_str}")
 
-    # Email the extracted orders file with the same item summary list
+    # Email with real HTML table
     send_orders_email(
         OUTPUT_DIR / 'extracted_orders_data.csv',
         summary_data=summary_data,
         prod_df=product_lookup_df,
     )
 
-    # cleanup
     await browser_instance.close()
     await playwright_instance.stop()
     return True
